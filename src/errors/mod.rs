@@ -14,6 +14,9 @@ pub enum ApiError {
 
     #[error("Not found: {0}")]
     NotFound(String),
+    
+    #[error("Invalid argument: {0}")]
+    InvalidArgument(String),
 }
 
 // Implement IntoResponse for Axum
@@ -22,6 +25,7 @@ impl IntoResponse for ApiError {
         let (status, error_message) = match self {
             ApiError::SimulationError(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg),
             ApiError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
+            ApiError::InvalidArgument(msg) => (StatusCode::BAD_REQUEST, msg),
         };
 
         let body = Json(json!({

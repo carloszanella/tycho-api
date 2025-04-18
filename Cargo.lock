@@ -7155,6 +7155,7 @@ dependencies = [
 name = "tycho-api"
 version = "0.1.0"
 dependencies = [
+ "alloy-primitives",
  "anyhow",
  "axum",
  "clap",

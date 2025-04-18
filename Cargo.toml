@@ -7,7 +7,12 @@ edition = "2021"
 # Simulation dependencies
 tycho-simulation = { git = "https://github.com/propeller-heads/tycho-simulation", rev = "79346a1" }
 num-bigint = "0.4"
-
+# Matching version of alloy-primitives used by tycho-simulation; https://github.com/propeller-heads/tycho-simulation/blob/79346a177e8e2209148b2ed6ca20bd18deb71bb7/Cargo.toml#L47
+alloy-primitives = { version = "0.8.9", features = [
+    "getrandom",
+    "rand",
+    "map-foldhash",
+] }
 # API and WebSocket server
 axum = { version = "0.7", features = ["ws"] }
 tower = "0.4"

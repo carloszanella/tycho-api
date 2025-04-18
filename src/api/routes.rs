@@ -6,6 +6,8 @@ use axum::{
 use num_bigint::BigUint;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use alloy_primitives::Address;
+use std::str::FromStr;
 
 use crate::errors::ApiError;
 use crate::simulation::state::SimulationState;
@@ -16,6 +18,7 @@ pub fn get_routes(state: SimulationState) -> Router {
     Router::new()
         .route("/", get(health_check))
         .route("/api/simulate", post(simulate_transaction))
+        .route("/api/limits", post(get_limits))
         .route("/ws", get(ws_handler))
         .with_state(state)
 }
@@ -116,4 +119,89 @@ async fn simulate_transaction(
         output_amount: amount_out,
         gas_estimate: total_gas,
     }))
+}
+
+#[derive(Debug, Deserialize)]
+struct LimitsRequest {
+    pool_address: String,
+    sell_token: String,
+    buy_token: String,
+}
+
+#[derive(Debug, Serialize)]
+struct LimitsResponse {
+    success: bool,
+    min_amount: String,
+    max_amount: String,
+}
+
+async fn get_limits(
+    State(state): State<SimulationState>,
+    Json(request): Json<LimitsRequest>,
+) -> Result<Json<LimitsResponse>, ApiError> {
+    tracing::info!("Received get_limits request for pool: {}, sell_token: {}, buy_token: {}", 
+        request.pool_address, request.sell_token, request.buy_token);
+    
+    let (component, pool_state) = state.get_pool_state(&request.pool_address).await;
+    tracing::info!("Pool lookup results - found component: {}, found pool state: {}", 
+        component.is_some(), pool_state.is_some());
+    
+    let pool = match pool_state {
+        Some(p) => {
+            tracing::info!("Found pool state for {}", request.pool_address);
+            p
+        },
+        None => {
+            let err_msg = format!("Pool not found: {}", request.pool_address);
+            tracing::error!("{}", err_msg);
+            return Err(ApiError::NotFound(err_msg));
+        }
+    };
+    
+    // Parse addresses to alloy_primitives::Address format
+    tracing::info!("Attempting to parse sell token address: {}", request.sell_token);
+    let sell_token_address = match Address::from_str(&request.sell_token) {
+        Ok(addr) => {
+            tracing::info!("Successfully parsed sell token address");
+            addr
+        },
+        Err(e) => {
+            let err_msg = format!("Invalid sell token address format: {}. Ensure it's a valid Ethereum address (0x followed by 40 hex chars)", request.sell_token);
+            tracing::error!("{}: {:?}", err_msg, e);
+            return Err(ApiError::InvalidArgument(err_msg));
+        }
+    };
+    
+    tracing::info!("Attempting to parse buy token address: {}", request.buy_token);
+    let buy_token_address = match Address::from_str(&request.buy_token) {
+        Ok(addr) => {
+            tracing::info!("Successfully parsed buy token address");
+            addr
+        },
+        Err(e) => {
+            let err_msg = format!("Invalid buy token address format: {}. Ensure it's a valid Ethereum address (0x followed by 40 hex chars)", request.buy_token);
+            tracing::error!("{}: {:?}", err_msg, e);
+            return Err(ApiError::InvalidArgument(err_msg));
+        }
+    };
+    
+    // Get limits from the pool
+    tracing::info!("Calling get_limits on pool");
+    let limits_result = pool.get_limits(sell_token_address, buy_token_address);
+    
+    match limits_result {
+        Ok((min, max)) => {
+            tracing::info!("Successfully got limits: min={}, max={}", min, max);
+            Ok(Json(LimitsResponse {
+                success: true,
+                min_amount: min.to_string(),
+                max_amount: max.to_string(),
+            }))
+        },
+        Err(e) => {
+            let err_msg = format!("Error getting limits: {}", e);
+            tracing::error!("{}", err_msg);
+            Err(ApiError::SimulationError(err_msg))
+        }
+    }
 }
