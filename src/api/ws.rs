@@ -24,6 +24,9 @@ async fn handle_socket(websocket: axum::extract::ws::WebSocket, state: Simulatio
     // Subscribe to simulation updates
     let mut update_rx = state.subscribe_to_updates();
 
+    // Create a channel to signal connection closure
+    let (close_tx, close_rx) = tokio::sync::oneshot::channel();
+
     // Send current state immediately when a client connects
     let latest_block = state.get_full_state().await;
     if let Ok(msg) = serde_json::to_string(&latest_block) {
@@ -35,39 +38,52 @@ async fn handle_socket(websocket: axum::extract::ws::WebSocket, state: Simulatio
 
     // Spawn a task to handle sending updates to the client
     let send_task = tokio::spawn(async move {
+        let mut close_rx = close_rx;
+        
         loop {
-            // Receive the next update from the broadcast channel
-            let update = match update_rx.recv().await {
-                Ok(update) => update,
-                Err(broadcast::error::RecvError::Closed) => {
-                    info!("Update channel closed");
+            tokio::select! {
+                // Check if we should stop sending (connection closed)
+                _ = &mut close_rx => {
+                    info!("Send task shutting down due to connection closure");
                     break;
                 }
-                Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                    error!("Client lagging behind, skipped {} messages", skipped);
-                    continue;
-                }
-            };
+                update_result = update_rx.recv() => {
+                    // Receive the next update from the broadcast channel
+                    let update = match update_result {
+                        Ok(update) => update,
+                        Err(broadcast::error::RecvError::Closed) => {
+                            info!("Update channel closed");
+                            break;
+                        }
+                        Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                            error!("Client lagging behind, skipped {} messages", skipped);
+                            continue;
+                        }
+                    };
 
-            // Serialize the update to send to the client
-            let msg = match serde_json::to_string(&update) {
-                Ok(msg) => msg,
-                Err(e) => {
-                    error!("Error serializing update: {}", e);
-                    continue;
-                }
-            };
+                    // Serialize the update to send to the client
+                    let msg = match serde_json::to_string(&update) {
+                        Ok(msg) => msg,
+                        Err(e) => {
+                            error!("Error serializing update: {}", e);
+                            continue;
+                        }
+                    };
 
-            // Send the update to the client
-            if let Err(e) = sender.send(axum::extract::ws::Message::Text(msg)).await {
-                error!("Error sending message: {}", e);
-                break;
+                    // Send the update to the client
+                    if let Err(e) = sender.send(axum::extract::ws::Message::Text(msg)).await {
+                        error!("Error sending message: {}", e);
+                        break;
+                    }
+                }
             }
         }
     });
 
     // Handle messages from the client
     let receive_task = tokio::spawn(async move {
+        let close_tx = close_tx;
+        
         while let Some(result) = receiver.next().await {
             match result {
                 Ok(axum::extract::ws::Message::Text(text)) => {
@@ -78,11 +94,21 @@ async fn handle_socket(websocket: axum::extract::ws::WebSocket, state: Simulatio
                 }
                 Ok(axum::extract::ws::Message::Close(_)) => {
                     info!("Client initiated close");
+                    let _ = close_tx.send(());
+                    break;
+                }
+                // Also handle connection errors
+                Err(_) => {
+                    info!("Connection error");
+                    let _ = close_tx.send(());
                     break;
                 }
                 _ => {}
             }
         }
+        
+        // If we got here without matching a close frame, the connection was dropped
+        info!("Client disconnected");
     });
 
     // Wait for either task to finish
